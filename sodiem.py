@@ -1,5 +1,7 @@
-from flask import Flask, jsonify, url_for
+from flask import Flask, abort, jsonify, redirect, request, url_for, make_response
 from markupsafe import escape
+from io import StringIO
+import csv
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -87,19 +89,159 @@ def layout(title, body):
 
 @app.route("/")
 def index():
-    return layout("Trang chủ", "<p>Đang xây dựng trang chủ.</p>")
+    total_students = len(STUDENTS)
+    total_classes = len({s["lop"] for s in STUDENTS.values()})
+
+    body = f"""
+    <p>Tổng số sinh viên: {escape(total_students)}</p>
+    <p>Số lớp: {escape(total_classes)}</p>
+    <p><a href="{escape(url_for('student_list'))}">Danh sách sinh viên</a></p>
+    <p><a href="{escape(url_for('api_student_list'))}">API danh sách sinh viên</a></p>
+    """
+    return layout("Trang chủ", body)
 
 
 @app.route("/students")
 def student_list():
-    return layout("Sinh viên", "<p>Đang xây dựng danh sách.</p>")
+    lop = request.args.get("lop", "")
+    classes = sorted({s["lop"] for s in STUDENTS.values()})
+
+    links = [
+        f'<a href="{escape(url_for("student_list"))}">Tất cả</a>'
+    ]
+    for class_name in classes:
+        link = url_for("student_list", lop=class_name)
+        links.append(
+            f'<a href="{escape(link)}">{escape(class_name)}</a>'
+        )
+
+    rows = ""
+    for mssv, student in STUDENTS.items():
+        if lop and student["lop"].lower() != lop.lower():
+            continue
+
+        info = student_summary(mssv)
+        avg_text = (
+            "—" if info["average"] is None
+            else f"{info['average']:.2f}"
+        )
+
+        rows += f"""
+        <tr>
+            <td><a href="{escape(url_for('student_detail', mssv=mssv))}">{escape(mssv)}</a></td>
+            <td>{escape(info['name'])}</td>
+            <td>{escape(info['lop'])}</td>
+            <td>{escape(avg_text)}</td>
+            <td>{escape(info['rank'])}</td>
+        </tr>
+        """
+
+    body = "<p>" + " | ".join(links) + "</p>"
+    if rows:
+        body += f"""
+        <table border="1" cellpadding="6">
+            <tr>
+                <th>MSSV</th><th>Họ tên</th><th>Lớp</th>
+                <th>Điểm TB</th><th>Xếp loại</th>
+            </tr>
+            {rows}
+        </table>
+        """
+    else:
+        body += "<p>Không có sinh viên phù hợp.</p>"
+
+    return layout("Danh sách sinh viên", body)
 
 
 @app.route("/search")
 def search():
-    return layout("Tìm kiếm", "<p>Đang xây dựng tìm kiếm.</p>")
+    q = request.args.get("q", "")
+    keyword = q.lower()
+
+    results = []
+    for mssv, student in STUDENTS.items():
+        if keyword in student["name"].lower() or keyword in mssv.lower():
+            results.append((mssv, student))
+
+    items = ""
+    for mssv, student in results:
+        detail_url = url_for("student_detail", mssv=mssv)
+        items += f"""
+        <li><a href="{escape(detail_url)}">{escape(mssv)} - {escape(student['name'])}</a></li>
+        """
+
+    body = f"""
+    <form method="get" action="{escape(url_for('search'))}">
+        <input type="text" name="q" value="{escape(q)}">
+        <button type="submit">Tìm kiếm</button>
+    </form>
+    <p>Tìm thấy {escape(len(results))} kết quả cho “{escape(q)}”.</p>
+    <ul>{items}</ul>
+    """
+    return layout("Tìm kiếm", body)
 
 
 @app.route("/api/students")
 def api_student_list():
     return jsonify([])
+
+@app.route("/students/<mssv>")
+def student_detail(mssv):
+    if mssv not in STUDENTS:
+        abort(404, description=f"Không có sinh viên với MSSV = {mssv}.")
+
+    info = student_summary(mssv)
+    avg_text = (
+        "—" if info["average"] is None
+        else f"{info['average']:.2f}"
+    )
+
+    rows = ""
+    for course, score in info["scores"].items():
+        rows += f"""
+        <tr><td>{escape(course)}</td><td>{escape(score)}</td></tr>
+        """
+
+    class_url = url_for("student_list", lop=info["lop"])
+    export_url = url_for("student_export", mssv=mssv)
+    short_url = url_for("student_short", mssv=mssv)
+
+    body = f"""
+    <p>Họ tên: {escape(info['name'])}</p>
+    <p>MSSV: {escape(mssv)}</p>
+    <p>Lớp: <a href="{escape(class_url)}">{escape(info['lop'])}</a></p>
+    <p>Điểm TB: {escape(avg_text)}</p>
+    <p>Xếp loại: {escape(info['rank'])}</p>
+    <table border="1" cellpadding="6">
+        <tr><th>Học phần</th><th>Điểm</th></tr>
+        {rows}
+    </table>
+    <p><a href="{escape(export_url)}">Tải bảng điểm (CSV)</a></p>
+    <p>Link rút gọn: <a href="{escape(short_url)}">{escape(short_url)}</a></p>
+    """
+    return layout(info["name"], body)
+
+
+@app.route("/sv/<mssv>")
+def student_short(mssv):
+    return redirect(
+        url_for("student_detail", mssv=mssv), code=301
+    )
+
+
+@app.route("/students/<mssv>/export")
+def student_export(mssv):
+    if mssv not in STUDENTS:
+        abort(404, description=f"Không có sinh viên với MSSV = {mssv}.")
+
+    output = StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(["hoc_phan", "diem"])
+    writer.writerows(STUDENTS[mssv]["scores"].items())
+
+    response = make_response(output.getvalue())
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=diem_{mssv}.csv"
+    )
+    return response
