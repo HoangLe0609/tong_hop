@@ -319,3 +319,33 @@ def api_score(mssv, course):
 
     del scores[course]
     return "", 204
+
+@app.errorhandler(400)
+@app.errorhandler(404)
+@app.errorhandler(405)
+def handle_error(error):
+    titles = {
+        400: "Dữ liệu không hợp lệ",
+        404: "Không tìm thấy",
+        405: "Phương thức không được hỗ trợ",
+    }
+    code = error.code
+    title = titles[code]
+    detail = error.description
+    response = error.get_response()
+
+    if request.path.startswith("/api/"):
+        response.set_data(
+            app.json.dumps({"error": title, "detail": detail})
+        )
+        response.content_type = "application/json"
+    else:
+        body = f"""
+        <h2>{escape(code)} - {escape(title)}</h2>
+        <p>{escape(detail)}</p>
+        """
+        response.set_data(layout(title, body))
+        response.content_type = "text/html; charset=utf-8"
+
+    response.status_code = code
+    return response
